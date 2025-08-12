@@ -570,6 +570,7 @@ DWORD RunUpdatePayloadThreadProc(THREAD_ARGS* pArgs)
     // age out more quickly and improves cipher text detection rate.
     LockAndThrashL2(0);
     LockAndThrashL2(1);
+    LockAndThrashL2(2);
 
     // Poke MmPhysical64KBMappingTable so the hypervisor pages get mapped into memory. This allows us to observe the cipher
     // text for the hypervisor segments and know when we get the block overwrite we want.
@@ -679,7 +680,7 @@ static void CiphertextOverwriteLoop(void *pScratchPtr, CIPHER_TEXT_DATA *pCipher
     replacements = pCipherTextData->replacements;
     replacements2 = pCipherTextData->replacements2;
 
-    int delayCount = 1500000, writeCount = 100000;
+    int delayCount = 1350000, writeCount = 100000;
 
     _asm
     {
